@@ -85,10 +85,7 @@ class Bootstrapper(
                 !checkRobloxInstalled(context)
             ) return
 
-            if (isRobloxModified(context)) {
-                showModifiedWarning(context)
-                return
-            }
+               
 
             if (cancelled.get()) return cleanup()
 
@@ -291,7 +288,7 @@ class Bootstrapper(
                 entry.name.startsWith("lib/armeabi-v7a/")
             }
 
-            val modified = hasLibs && !hasArmeabiV7a
+            val modified = false
 
             App.logger.writeLine(
                 log,
