@@ -85,10 +85,11 @@ class Bootstrapper(
                 !checkRobloxInstalled(context)
             ) return
 
-            if (isRobloxModified(context)) {
-                showModifiedWarning(context)
-                return
-            }
+            // 已移除：修改版检测与警告逻辑
+            // if (isRobloxModified(context)) {
+            //     showModifiedWarning(context)
+            //     return
+            // }
 
             if (cancelled.get()) return cleanup()
 
@@ -267,60 +268,8 @@ class Bootstrapper(
         }
     }
 
-    private fun isRobloxModified(context: Context): Boolean {
-        val log = "Bootstrapper::isRobloxModified"
-        val pkg = packageName ?: return false
-
-        return try {
-            val source = File(
-                context.packageManager
-                    .getApplicationInfo(pkg, 0)
-                    .sourceDir
-            )
-
-            if (!source.exists()) return false
-
-            ZipFile(source).use { zip ->
-                val entries = Collections.list(zip.entries())
-
-                val hasLibs = entries.any { entry ->
-                    entry.name.startsWith("lib/")
-                }
-
-                val hasArmeabiV7a = entries.any { entry ->
-                    entry.name.startsWith("lib/armeabi-v7a/")
-                }
-
-                val modified = hasLibs && !hasArmeabiV7a
-
-                App.logger.writeLine(
-                    log,
-                    "hasLibs=$hasLibs | hasArmeabiV7a=$hasArmeabiV7a | modified=$modified"
-                )
-
-                if (modified) {
-                    App.logger.writeLine(
-                        log,
-                        "Roblox modification detected: lib/ exists without lib/armeabi-v7a/"
-                    )
-                } else {
-                    App.logger.writeLine(
-                        log,
-                        "No Roblox modification detected"
-                    )
-                }
-
-                modified
-            }
-        } catch (e: Exception) {
-            App.logger.writeLine(
-                log,
-                "Failed to check Roblox modification"
-            )
-            App.logger.writeException(log, e)
-            false
-        }
-    }
+    // 已移除：isRobloxModified 方法
+    // private fun isRobloxModified(context: Context): Boolean { ... }
 
     private fun applyChanges(): Boolean {
         val log = "Bootstrapper::applyChanges"
@@ -496,19 +445,8 @@ class Bootstrapper(
         }
     }
 
-    private fun showModifiedWarning(context: Context) {
-        handler.post {
-            closeDialog()
-
-            Frontend.showMessageBox(
-                App.savedFragmentActivity,
-                getTextLocale(
-                    context,
-                    R.string.dialog_modded_roblox_warning
-                )
-            )
-        }
-    }
+    // 已移除：showModifiedWarning 方法
+    // private fun showModifiedWarning(context: Context) { ... }
 
     private fun updateStatus(
         resId: Int,
