@@ -82,15 +82,25 @@ class Logger private constructor() {
 
     fun writeException(identifier: String?, ex: Exception?) {
         val hResult = "0x" + Integer.toHexString((ex?.hashCode() ?: 0)).uppercase()
-        writeLineInternal("[$identifier] ($hResult) ${ex ?: "null"}")
+        // FIX: include the stack trace so errors are actually debuggable.
+        writeLineInternal("[$identifier] ($hResult) ${ex ?: "null"}\n${ex?.stackTraceToString() ?: ""}")
     }
 
     private fun writeLineInternal(message: String) {
         val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
         val output = "$timestamp $message"
 
-        println(output)
-        history.add(output)
+        // FIX: use logcat instead of println.
+        android.util.Log.i("Chevstrap", output)
+
+        // FIX: cap the in-memory history so it can't grow forever.
+        synchronized(history) {
+            history.add(output)
+            if (history.size > MAX_HISTORY) {
+                history.subList(0, history.size - MAX_HISTORY).clear()
+            }
+        }
+
         writeToLog(output)
     }
 
@@ -108,6 +118,8 @@ class Logger private constructor() {
     }
 
     companion object {
+        private const val MAX_HISTORY = 2000
+
         @Volatile
         private var instanceDelegate: Logger? = null
 
