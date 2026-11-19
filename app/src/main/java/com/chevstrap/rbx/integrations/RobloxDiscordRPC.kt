@@ -32,21 +32,12 @@ import java.util.concurrent.ConcurrentMap
 import kotlin.time.Duration.Companion.milliseconds
 
 class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
-    private val externalAssetFetcher =
-        ExternalAssetFetcher()
+    private val externalAssetFetcher = ExternalAssetFetcher()
 
-    private var discordRichPresence: DiscordWsManager? =
-        DiscordWsManager()
+    private var discordRichPresence: DiscordWsManager? = DiscordWsManager()
 
-    private val presenceScope =
-        CoroutineScope(
-            SupervisorJob() + Dispatchers.IO
-        )
-
-    private val visibilityScope =
-        CoroutineScope(
-            SupervisorJob() + Dispatchers.IO
-        )
+    private val presenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val visibilityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var presenceJob: Job? = null
     private var visibilityJob: Job? = null
@@ -61,32 +52,21 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
 
     private val rpcSpamLock = Any()
 
-    private val thumbnailCache:
-            ConcurrentMap<String, String> =
-        ConcurrentHashMap()
+    private val thumbnailCache: ConcurrentMap<String, String> = ConcurrentHashMap()
 
-    private val lastRPCSignatures =
-        HashMap<String, String>()
+    private val lastRPCSignatures = HashMap<String, String>()
+    private val lastRPCMessageTimes = HashMap<String, Long>()
 
-    private val lastRPCMessageTimes =
-        HashMap<String, Long>()
-
-    private val jsonFormatter =
-        Json {
-            encodeDefaults = true
-            ignoreUnknownKeys = true
-            coerceInputValues = true
-        }
+    private val jsonFormatter = Json {
+        encodeDefaults = true
+        ignoreUnknownKeys = true
+        coerceInputValues = true
+    }
 
     companion object {
-        const val APPLICATION_ID =
-            "1530730297967120534"
-
-        const val RPC_MIN_INTERVAL_MS =
-            1000L
-
-        private const val MAX_THUMBNAIL_CACHE_SIZE =
-            100
+        const val APPLICATION_ID = "1530730297967120534"
+        const val RPC_MIN_INTERVAL_MS = 1000L
+        private const val MAX_THUMBNAIL_CACHE_SIZE = 100
     }
 
     data class PresenceImages(
@@ -108,17 +88,13 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         val metadata: Metadata? = null
     )
 
-    fun isVisibleState(): Boolean =
-        isVisible
+    fun isVisibleState(): Boolean = isVisible
 
     private fun registerListener() {
         discordRichPresence?.setListener(
-            object :
-                DiscordWsImplementation.DiscordWsListener {
+            object : DiscordWsImplementation.DiscordWsListener {
 
-                override fun onReady(
-                    user: JSONObject?
-                ) {
+                override fun onReady(user: JSONObject?) {
                     discordReady = true
 
                     App.logger.writeLine(
@@ -132,10 +108,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
                 override fun onPresenceUpdate() {
                 }
 
-                override fun onError(
-                    message: String,
-                    throwable: Throwable?
-                ) {
+                override fun onError(message: String, throwable: Throwable?) {
                     App.logger.writeLine(
                         "RobloxDiscordRPC::onError",
                         "An RPC error occurred - $message"
@@ -157,10 +130,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
                     discordReady = false
                 }
 
-                override fun onClose(
-                    reason: String,
-                    code: Int
-                ) {
+                override fun onClose(reason: String, code: Int) {
                     discordReady = false
                 }
             }
@@ -177,14 +147,16 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     }
 
     fun setCurrentGame() {
-        if (
-            isDisposed ||
-            !App.config.data.showGameActivity
-        ) {
+        if (isDisposed || !App.config.data.showGameActivity) {
             return
         }
 
         if (!activityWatcher.isInExperienceState()) {
+            // FIX: cancel any in-flight presence build so it can't re-publish
+            // a stale game after we have left.
+            presenceJob?.cancel()
+            presenceJob = null
+
             customMessageRPC = null
             currentPresence = null
             currentGameStartTime = null
@@ -194,257 +166,151 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
 
         presenceJob?.cancel()
 
-        presenceJob =
-            presenceScope.launch {
-                try {
-                    ensureActive()
+        presenceJob = presenceScope.launch {
+            try {
+                ensureActive()
 
-                    val activityData =
-                        activityWatcher.getActivityData()
-                            ?: return@launch
+                val activityData = activityWatcher.getActivityData() ?: return@launch
 
-                    val rpcData =
-                        customMessageRPC
+                val rpcData = customMessageRPC
 
-                    val custom =
-                        parseCustomPresence(rpcData)
+                val custom = parseCustomPresence(rpcData)
 
-                    val detailsData =
-                        activityData.universeDetails?.data
+                val detailsData = activityData.universeDetails?.data
 
-                    val gameName =
-                        detailsData?.name.orEmpty()
+                val gameName = detailsData?.name.orEmpty()
 
-                    val details =
-                        custom?.details
-                            ?: gameName.ifBlank {
-                                "Playing Roblox"
-                            }
+                val details = custom?.details ?: gameName.ifBlank { "Playing Roblox" }
 
-                    val icons =
-                        updatePresenceIconsAsync(
-                            activityData,
-                            rpcData
-                        )
+                val icons = updatePresenceIconsAsync(activityData, rpcData)
 
-                    ensureActive()
+                ensureActive()
 
-                    val smallImage: String?
-                    val smallText: String?
+                val smallImage: String?
+                val smallText: String?
 
-                    if (
-                        App.config.data.showRobloxAccount
-                    ) {
-                        val userDetails =
-                            UserDetails.fetch(
-                                activityData.userId
-                            )
+                if (App.config.data.showRobloxAccount) {
+                    val userDetails = UserDetails.fetch(activityData.userId)
 
-                        val displayName =
-                            userDetails.data?.displayName
+                    val displayName = userDetails.data?.displayName
+                    val userName = userDetails.data?.name
 
-                        val userName =
-                            userDetails.data?.name
+                    smallImage = icons.small
 
-                        smallImage =
-                            icons.small
-
-                        smallText =
-                            if (
-                                displayName.isNullOrBlank() ||
-                                displayName == userName
-                            ) {
-                                "Playing on @$userName"
-                            } else {
-                                "Playing on $displayName @$userName"
-                            }
-                    } else {
-                        smallImage =
-                            custom?.smallImage
-                                ?: icons.small
-
-                        smallText =
-                            custom?.smallText
-                                ?: icons.smallHoverText.orEmpty()
-                    }
-
-                    val assets =
-                        Assets(
-                            largeImage =
-                                custom?.largeImage
-                                    ?: icons.large,
-                            smallImage =
-                                smallImage,
-                            smallText =
-                                smallText
-                        )
-
-                    val creatorName =
-                        detailsData?.creator?.name
-                            ?.takeIf {
-                                it.isNotBlank()
-                            }
-                            ?: "N/A"
-
-                    val verifiedSuffix =
-                        if (
-                            detailsData?.creator
-                                ?.hasVerifiedBadge == true
-                        ) {
-                            " ☑️"
+                    smallText =
+                        if (displayName.isNullOrBlank() || displayName == userName) {
+                            "Playing on @$userName"
                         } else {
-                            ""
+                            "Playing on $displayName @$userName"
                         }
+                } else {
+                    smallImage = custom?.smallImage ?: icons.small
+                    smallText = custom?.smallText ?: icons.smallHoverText.orEmpty()
+                }
 
-                    val reserved =
-                        activityData.serverType ==
-                                ServerType.RESERVED &&
-                                activityData.rpcLaunchData
-                                    .isNullOrEmpty()
+                val assets = Assets(
+                    largeImage = custom?.largeImage ?: icons.large,
+                    smallImage = smallImage,
+                    smallText = smallText
+                )
 
-                    val state =
-                        custom?.state
-                            ?: if (reserved) {
-                                "In a Reserved server"
-                            } else {
-                                "By $creatorName$verifiedSuffix"
-                            }
+                val creatorName = detailsData?.creator?.name
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "N/A"
 
-                    if (currentGameStartTime == null) {
-                        currentGameStartTime =
-                            System.currentTimeMillis() / 1000L
+                val verifiedSuffix =
+                    if (detailsData?.creator?.hasVerifiedBadge == true) " ☑️" else ""
+
+                val reserved =
+                    activityData.serverType == ServerType.RESERVED &&
+                            activityData.rpcLaunchData.isNullOrEmpty()
+
+                val state = custom?.state
+                    ?: if (reserved) {
+                        "In a Reserved server"
+                    } else {
+                        "By $creatorName$verifiedSuffix"
                     }
 
-                    val timestamps =
-                        Timestamps(
-                            start =
-                                currentGameStartTime!! * 1000L
-                        )
-
-                    val buttons =
-                        getButtonsInfo(
-                            activityData
-                        )
-
-                    val presence =
-                        Activity(
-                            name = "Roblox",
-                            type = 0,
-                            applicationId =
-                                APPLICATION_ID,
-                            createdAt =
-                                System.currentTimeMillis(),
-                            details =
-                                details,
-                            state =
-                                state,
-                            timestamps =
-                                timestamps,
-                            assets =
-                                assets,
-                            buttons =
-                                buttons.buttons?.items,
-                            metadata =
-                                buttons.metadata
-                        )
-
-                    ensureActive()
-
-                    currentPresence =
-                        jsonFormatter.encodeToString(
-                            presence
-                        )
-
-                    App.logger.writeLine(
-                        "RobloxDiscordRPC::setCurrentGame",
-                        "Prepared Rich Presence: $currentPresence"
-                    )
-
-                    updatePresence()
-                } catch (
-                    e: CancellationException
-                ) {
-                    throw e
-                } catch (
-                    e: Exception
-                ) {
-                    App.logger.writeException(
-                        "Failed to update Discord presence",
-                        e
-                    )
+                if (currentGameStartTime == null) {
+                    currentGameStartTime = System.currentTimeMillis() / 1000L
                 }
+
+                val timestamps = Timestamps(start = currentGameStartTime!! * 1000L)
+
+                val buttons = getButtonsInfo(activityData)
+
+                val presence = Activity(
+                    name = "Roblox",
+                    type = 0,
+                    applicationId = APPLICATION_ID,
+                    createdAt = System.currentTimeMillis(),
+                    details = details,
+                    state = state,
+                    timestamps = timestamps,
+                    assets = assets,
+                    buttons = buttons.buttons?.items,
+                    metadata = buttons.metadata
+                )
+
+                ensureActive()
+
+                currentPresence = jsonFormatter.encodeToString(presence)
+
+                App.logger.writeLine(
+                    "RobloxDiscordRPC::setCurrentGame",
+                    "Prepared Rich Presence: $currentPresence"
+                )
+
+                updatePresence()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                App.logger.writeException("Failed to update Discord presence", e)
             }
+        }
     }
 
-    private fun parseCustomPresence(
-        data: JSONObject?
-    ): CustomPresence? {
+    private fun parseCustomPresence(data: JSONObject?): CustomPresence? {
         if (data == null) {
             return null
         }
 
-        fun text(
-            key: String
-        ): String? {
+        fun text(key: String): String? {
             if (!data.has(key)) {
                 return null
             }
 
             return data.optString(key)
-                .takeIf {
-                    it.isNotBlank() &&
-                            it != "<reset>"
-                }
+                .takeIf { it.isNotBlank() && it != "<reset>" }
         }
 
-        fun image(
-            key: String
-        ): Pair<String?, String?> {
-            val obj =
-                data.optJSONObject(key)
-                    ?: return null to null
+        fun image(key: String): Pair<String?, String?> {
+            val obj = data.optJSONObject(key) ?: return null to null
 
-            if (
-                obj.optBoolean("reset") ||
-                obj.optBoolean("clear")
-            ) {
+            if (obj.optBoolean("reset") || obj.optBoolean("clear")) {
                 return null to null
             }
 
-            val assetId =
-                obj.optString("assetId")
-                    .takeIf {
-                        it.isNotBlank() &&
-                                it != "null"
-                    }
-                    ?.let(::resolveAsset)
+            val assetId = obj.optString("assetId")
+                .takeIf { it.isNotBlank() && it != "null" }
+                ?.let(::resolveAsset)
 
-            val hoverText =
-                obj.optString("hoverText")
-                    .takeIf {
-                        it.isNotBlank()
-                    }
+            val hoverText = obj.optString("hoverText")
+                .takeIf { it.isNotBlank() }
 
             return assetId to hoverText
         }
 
-        val small =
-            image("smallImage")
-
-        val large =
-            image("largeImage")
+        val small = image("smallImage")
+        val large = image("largeImage")
 
         return CustomPresence(
-            details =
-                text("details"),
-            state =
-                text("state"),
-            smallImage =
-                small.first,
-            smallText =
-                small.second,
-            largeImage =
-                large.first
+            details = text("details"),
+            state = text("state"),
+            smallImage = small.first,
+            smallText = small.second,
+            largeImage = large.first
         )
     }
 
@@ -469,153 +335,92 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     ): PresenceImages {
         currentCoroutineContext().ensureActive()
 
-        val gameThumbnail =
-            Thumbnails.getThumbnailUrl(
-                ThumbnailRequest(
-                    targetId =
-                        activityData.universeId,
-                    type =
-                        "GameIcon",
-                    size =
-                        "512x512",
-                    isCircular =
-                        false
-                )
+        val gameThumbnail = Thumbnails.getThumbnailUrl(
+            ThumbnailRequest(
+                targetId = activityData.universeId,
+                type = "GameIcon",
+                size = "512x512",
+                isCircular = false
             )
+        )
 
         val profileThumbnail =
-            if (
-                App.config.data.showRobloxAccount
-            ) {
+            if (App.config.data.showRobloxAccount) {
                 try {
-                    val userDetails =
-                        UserDetails.fetch(
-                            activityData.userId
-                        )
+                    val userDetails = UserDetails.fetch(activityData.userId)
 
                     userDetails.thumbnail
                         ?.imageUrl
-                        ?.let {
-                            fetchCachedThumbnail(it)
-                        }
-                } catch (
-                    e: CancellationException
-                ) {
+                        ?.let { fetchCachedThumbnail(it) }
+                } catch (e: CancellationException) {
                     throw e
-                } catch (
-                    _: Exception
-                ) {
+                } catch (_: Exception) {
                     null
                 }
             } else {
                 null
             }
 
-        val large =
-            rpcData
-                ?.optJSONObject("largeImage")
-                ?.optString("assetId")
-                ?.takeIf {
-                    it.isNotBlank() &&
-                            it != "null"
-                }
-                ?.let(::resolveAsset)
-                ?.let {
-                    fetchCachedThumbnail(it)
-                }
+        val large = rpcData
+            ?.optJSONObject("largeImage")
+            ?.optString("assetId")
+            ?.takeIf { it.isNotBlank() && it != "null" }
+            ?.let(::resolveAsset)
+            ?.let { fetchCachedThumbnail(it) }
 
-        val smallObject =
-            rpcData
-                ?.optJSONObject("smallImage")
+        val smallObject = rpcData?.optJSONObject("smallImage")
 
-        val small =
-            smallObject
-                ?.optString("assetId")
-                ?.takeIf {
-                    it.isNotBlank() &&
-                            it != "null"
-                }
-                ?.let(::resolveAsset)
-                ?.let {
-                    fetchCachedThumbnail(it)
-                }
+        val small = smallObject
+            ?.optString("assetId")
+            ?.takeIf { it.isNotBlank() && it != "null" }
+            ?.let(::resolveAsset)
+            ?.let { fetchCachedThumbnail(it) }
 
-        val smallText =
-            smallObject
-                ?.optString("hoverText")
-                ?.takeIf {
-                    it.isNotBlank()
-                }
+        val smallText = smallObject
+            ?.optString("hoverText")
+            ?.takeIf { it.isNotBlank() }
 
-        val fallbackLarge =
-            gameThumbnail?.let {
-                fetchCachedThumbnail(it)
-            }
+        val fallbackLarge = gameThumbnail?.let { fetchCachedThumbnail(it) }
 
         return PresenceImages(
-            large =
-                large ?: fallbackLarge,
-            small =
-                small ?: profileThumbnail,
-            smallHoverText =
-                smallText
+            large = large ?: fallbackLarge,
+            small = small ?: profileThumbnail,
+            smallHoverText = smallText
         )
     }
 
-    private fun getButtonsInfo(
-        activityData: ActivityData
-    ): ButtonResult {
-        if (
-            !App.config.data.allowActivityJoining
-        ) {
+    private fun getButtonsInfo(activityData: ActivityData): ButtonResult {
+        if (!App.config.data.allowActivityJoining) {
             return ButtonResult()
         }
 
-        val reserved =
-            activityData.serverType ==
-                    ServerType.RESERVED
+        val reserved = activityData.serverType == ServerType.RESERVED
 
-        val hideJoin =
-            reserved &&
-                    activityData.rpcLaunchData
-                        .isNullOrEmpty()
+        val hideJoin = reserved && activityData.rpcLaunchData.isNullOrEmpty()
 
-        val buttons =
-            mutableListOf<String>()
-
-        val urls =
-            mutableListOf<String>()
+        val buttons = mutableListOf<String>()
+        val urls = mutableListOf<String>()
 
         if (!hideJoin) {
             buttons += "Join Server"
-
-            urls +=
-                activityData.getInviteDeeplink("")
+            urls += activityData.getInviteDeeplink("")
         }
 
         buttons += "See game page"
-
-        urls +=
-            "https://www.roblox.com/games/" +
-                    activityData.rootPlaceId
+        urls += "https://www.roblox.com/games/" + activityData.rootPlaceId
 
         return ButtonResult(
-            buttons =
-                Buttons(buttons),
-            metadata =
-                Metadata(urls)
+            buttons = Buttons(buttons),
+            metadata = Metadata(urls)
         )
     }
 
-    fun processRPCMessage(
-        message: JSONObject
-    ) {
+    fun processRPCMessage(message: JSONObject) {
         if (isDisposed) {
             return
         }
 
-        val command =
-            message.optString("command")
+        val command = message.optString("command")
 
         App.logger.writeLine(
             "RobloxDiscordRPC::processRPCMessage",
@@ -623,115 +428,69 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         )
 
         when (command) {
-            "SetRichPresence" ->
-                processSetRichPresence(message)
-
-            "SetLaunchData" ->
-                processSetLaunchData(message)
+            "SetRichPresence" -> processSetRichPresence(message)
+            "SetLaunchData" -> processSetLaunchData(message)
         }
     }
 
-    private fun processSetRichPresence(
-        message: JSONObject
-    ) {
-        if (
-            isDisposed ||
-            !App.config.data.discordAllowCustomPresence
-        ) {
+    private fun processSetRichPresence(message: JSONObject) {
+        if (isDisposed || !App.config.data.discordAllowCustomPresence) {
             return
         }
 
-        val activityData =
-            activityWatcher.getActivityData()
-                ?: return
+        val activityData = activityWatcher.getActivityData() ?: return
 
-        val creator =
-            activityData.universeDetails
-                ?.data
-                ?.creator
+        val creator = activityData.universeDetails?.data?.creator
 
         if (
-            App.config.data
-                .discordVerifiedCustomPresenceOnly &&
+            App.config.data.discordVerifiedCustomPresenceOnly &&
             creator?.hasVerifiedBadge != true
         ) {
-            return
-        }
-
-        val data =
-            message.optJSONObject("data")
-                ?: return
-
-        if (
-            !shouldProcessRPCMessage(
-                "SetRichPresence",
-                data
+            App.logger.writeLine(
+                "RobloxDiscordRPC::processSetRichPresence",
+                "Ignored: verified-only custom presence is enabled and creator is not verified"
             )
-        ) {
             return
         }
 
-        validateText(
-            data,
-            "details"
-        )
+        val data = message.optJSONObject("data") ?: return
 
-        validateText(
-            data,
-            "state"
-        )
+        if (!shouldProcessRPCMessage("SetRichPresence", data)) {
+            return
+        }
 
-        sanitizeImage(
-            data,
-            "smallImage"
-        )
+        validateText(data, "details")
+        validateText(data, "state")
 
-        sanitizeImage(
-            data,
-            "largeImage"
-        )
+        sanitizeImage(data, "smallImage")
+        sanitizeImage(data, "largeImage")
 
-        customMessageRPC =
-            JSONObject(data.toString())
+        customMessageRPC = JSONObject(data.toString())
 
         App.logger.writeLine(
             "RobloxDiscordRPC::processSetRichPresence",
             "Custom Rich Presence: $customMessageRPC"
         )
 
-        if (
-            activityWatcher.isInExperienceState()
-        ) {
+        if (activityWatcher.isInExperienceState()) {
             setCurrentGame()
         }
     }
 
-    private fun validateText(
-        data: JSONObject,
-        key: String
-    ) {
+    private fun validateText(data: JSONObject, key: String) {
         if (!data.has(key)) {
             return
         }
 
-        val value =
-            data.optString(key)
+        val value = data.optString(key)
 
-        if (
-            value.length > 128 ||
-            value == "<reset>"
-        ) {
+        if (value.length > 128 || value == "<reset>") {
             data.remove(key)
         }
     }
 
-    private fun sanitizeImage(
-        data: JSONObject,
-        key: String
-    ) {
-        val image =
-            data.optJSONObject(key)
-                ?: return
+    private fun sanitizeImage(data: JSONObject, key: String) {
+        val image = data.optJSONObject(key) ?: return
 
         if (image.optBoolean("reset")) {
             data.remove(key)
@@ -743,131 +502,91 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         }
     }
 
-    private fun processSetLaunchData(
-        message: JSONObject
-    ) {
+    private fun processSetLaunchData(message: JSONObject) {
         if (isDisposed) {
             return
         }
 
-        val data =
-            message.optString("data")
-                .takeIf {
-                    it.isNotBlank()
-                }
-                ?: return
+        val data = message.optString("data")
+            .takeIf { it.isNotBlank() }
+            ?: return
 
         if (data.length > 200) {
             return
         }
 
-        activityWatcher.getActivityData()
-            ?.rpcLaunchData = data
+        activityWatcher.getActivityData()?.rpcLaunchData = data
 
-        if (
-            activityWatcher.isInExperienceState()
-        ) {
+        if (activityWatcher.isInExperienceState()) {
             setCurrentGame()
         }
     }
 
-    private suspend fun fetchCachedThumbnail(
-        url: String
-    ): String? {
+    private suspend fun fetchCachedThumbnail(url: String): String? {
         thumbnailCache[url]?.let {
             return it
         }
 
         currentCoroutineContext().ensureActive()
 
-        val result =
-            externalAssetFetcher.fetchMPOfUrl(
-                APPLICATION_ID,
-                url
-            )
+        val result = externalAssetFetcher.fetchMPOfUrl(APPLICATION_ID, url)
 
         if (!result.isNullOrBlank()) {
-            addToThumbnailCache(
-                url,
-                result
-            )
+            addToThumbnailCache(url, result)
         }
 
         return result
     }
 
-    private fun shouldProcessRPCMessage(
-        command: String,
-        data: JSONObject
-    ): Boolean {
+    private fun shouldProcessRPCMessage(command: String, data: JSONObject): Boolean {
         synchronized(rpcSpamLock) {
-            val now =
-                System.currentTimeMillis()
+            val now = System.currentTimeMillis()
 
-            val signature =
-                data.toString()
+            val signature = data.toString()
 
-            if (
-                lastRPCSignatures[command] ==
-                signature
-            ) {
+            if (lastRPCSignatures[command] == signature) {
                 return false
             }
 
-            val last =
-                lastRPCMessageTimes[command]
-                    ?: 0L
+            val last = lastRPCMessageTimes[command] ?: 0L
 
-            if (
-                now - last <
-                RPC_MIN_INTERVAL_MS
-            ) {
+            if (now - last < RPC_MIN_INTERVAL_MS) {
                 return false
             }
 
-            lastRPCSignatures[command] =
-                signature
-
-            lastRPCMessageTimes[command] =
-                now
+            lastRPCSignatures[command] = signature
+            lastRPCMessageTimes[command] = now
 
             return true
         }
     }
 
-    fun setVisibility(
-        visible: Boolean
-    ) {
+    fun setVisibility(visible: Boolean) {
         if (isDisposed) {
             return
         }
 
         visibilityJob?.cancel()
 
-        visibilityJob =
-            visibilityScope.launch {
-                delay(1000.milliseconds)
+        visibilityJob = visibilityScope.launch {
+            delay(1000.milliseconds)
 
-                if (isDisposed) {
-                    return@launch
-                }
-
-                isVisible =
-                    visible
-
-                if (visible) {
-                    setCurrentGame()
-                } else {
-                    clearRPC()
-                }
+            if (isDisposed) {
+                return@launch
             }
+
+            isVisible = visible
+
+            if (visible) {
+                setCurrentGame()
+            } else {
+                clearRPC()
+            }
+        }
     }
 
     private fun updatePresence() {
-        if (
-            isDisposed ||
-            !isVisible
-        ) {
+        if (isDisposed || !isVisible) {
             return
         }
 
@@ -879,18 +598,14 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
             return
         }
 
-        val presence =
-            currentPresence
-                ?: return
+        val presence = currentPresence ?: return
 
         App.logger.writeLine(
             "RobloxDiscordRPC::updatePresence",
             "Sending Rich Presence: $presence"
         )
 
-        discordRichPresence?.setRPC(
-            presence
-        )
+        discordRichPresence?.setRPC(presence)
     }
 
     private fun clearRPC() {
@@ -898,18 +613,17 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
 
         if (discordReady) {
             discordRichPresence?.clearRPC()
+        } else {
+            App.logger.writeLine(
+                "RobloxDiscordRPC::clearRPC",
+                "Discord gateway not ready; clear will be applied when it becomes ready"
+            )
         }
     }
 
-    private fun addToThumbnailCache(
-        key: String,
-        value: String
-    ) {
+    private fun addToThumbnailCache(key: String, value: String) {
         synchronized(thumbnailCache) {
-            if (
-                thumbnailCache.size >=
-                MAX_THUMBNAIL_CACHE_SIZE
-            ) {
+            if (thumbnailCache.size >= MAX_THUMBNAIL_CACHE_SIZE) {
                 thumbnailCache.keys
                     .firstOrNull()
                     ?.let {
@@ -919,8 +633,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
                     }
             }
 
-            thumbnailCache[key] =
-                value
+            thumbnailCache[key] = value
         }
     }
 
