@@ -215,7 +215,9 @@ class ActivityWatcher {
     private fun getLatestLog(logLocation: File): File? {
         return try {
             FileTool.listFiles(logLocation)
-                .filter { it.isFile }
+                // FIX: only consider real .log files so an unrelated file can't
+                // make the watcher jump between files.
+                .filter { it.isFile && it.name.endsWith(".log") }
                 .maxWithOrNull(
                     compareBy<File> { it.lastModified() }
                         .thenBy { it.length() }
@@ -254,7 +256,7 @@ class ActivityWatcher {
                     "placeId=$placeId, serverType=${activityData.serverType}"
         )
     }
-    
+
     @Synchronized
     private fun finishActiveActivity() {
         val activityData = data ?: return
@@ -345,12 +347,25 @@ class ActivityWatcher {
             return
         }
 
+        // FIX: if a new join shows up while the previous game is still marked
+        // active (missed disconnect line, rejoin, teleport), close the old
+        // session first. Before, the join was ignored forever.
+        if (line.contains(joinServer) && isInExperience) {
+            App.logger.writeLine(
+                tag,
+                "Join seen while still in an experience; closing previous session"
+            )
+            finishActiveActivity()
+        }
+
         val activityData = data ?: return
 
         try {
             if (line.contains(leavingRoblox)) {
+                // FIX: do NOT dispose() here. stage:None can be logged when you
+                // leave a game, and disposing killed the watcher + RPC so no
+                // later game was ever detected.
                 finishActiveActivity()
-                dispose()
                 return
             }
 
@@ -560,8 +575,23 @@ class ActivityWatcher {
                 return
             }
 
-            if (line.contains(bsRPC) && isInExperience) {
+            // FIX: always log BloxstrapRPC lines and say why they are ignored,
+            // instead of silently dropping them.
+            if (line.contains(bsRPC)) {
+                App.logger.writeLine(
+                    tag,
+                    "BloxstrapRPC line seen (inExperience=$isInExperience, " +
+                            "allowCustom=${App.config.data.discordAllowCustomPresence}, " +
+                            "enableRPC=$isEnableRPC)"
+                )
+
+                if (!isInExperience) {
+                    App.logger.writeLine(tag, "Ignoring BloxstrapRPC message: not in an experience")
+                    return
+                }
+
                 if (!App.config.data.discordAllowCustomPresence) {
+                    App.logger.writeLine(tag, "Ignoring BloxstrapRPC message: custom presence is disabled")
                     return
                 }
 
@@ -591,6 +621,8 @@ class ActivityWatcher {
                         discordRPC?.processRPCMessage(
                             JSONObject(messagePlain)
                         )
+                    } else {
+                        App.logger.writeLine(tag, "RPC is disabled (showGameActivity), message not processed")
                     }
                 } catch (e: Exception) {
                     App.logger.writeLine(
@@ -630,9 +662,9 @@ class ActivityWatcher {
         )
 
         try {
-            if (isEnableRPC) {
-                discordRPC?.dispose()
-            }
+            // FIX: always dispose the RPC (it used to depend on isEnableRPC,
+            // which is only set once start() has run).
+            discordRPC?.dispose()
         } catch (e: Exception) {
             App.logger.writeLine(
                 tag,
