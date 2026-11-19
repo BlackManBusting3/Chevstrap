@@ -20,35 +20,18 @@ class CustomWatcher private constructor() {
 
     private var running = false
 
-    init {
-        createWatcher()
-    }
+    // FIX: the old init { createWatcher() } was removed. It created an extra
+    // ActivityWatcher + RobloxDiscordRPC (a second Discord gateway session) that
+    // run() later dropped without ever disposing.
 
-    private fun createWatcher() {
-        try {
-            val watcher = ActivityWatcher()
-            activityWatcher = watcher
-            robloxDiscordRPC = RobloxDiscordRPC(watcher)
-        } catch (ex: Exception) {
-            App.logger.writeException(LOG_IDENTIFIER, ex)
-            activityWatcher = null
-            robloxDiscordRPC = null
-        }
-    }
-
-    @Synchronized
-    fun dispose() {
-        if (isDisposed) return
-
-        isDisposed = true
-        running = false
-
-        App.logger.writeLine(LOG_IDENTIFIER, "Disposing CustomWatcher")
-
+    /** Stops and releases the current watcher + RPC (safe to call repeatedly). */
+    private fun teardownCurrent() {
         val watcher = activityWatcher
+        val rpc = robloxDiscordRPC
+
         activityWatcher = null
         robloxDiscordRPC = null
-        activityData = null
+        running = false
 
         try {
             if (watcher != null && !watcher.isStopMonitoring) {
@@ -57,6 +40,24 @@ class CustomWatcher private constructor() {
         } catch (ex: Exception) {
             App.logger.writeException(LOG_IDENTIFIER, ex)
         }
+
+        try {
+            rpc?.dispose()
+        } catch (ex: Exception) {
+            App.logger.writeException(LOG_IDENTIFIER, ex)
+        }
+    }
+
+    @Synchronized
+    fun dispose() {
+        if (isDisposed) return
+
+        isDisposed = true
+
+        App.logger.writeLine(LOG_IDENTIFIER, "Disposing CustomWatcher")
+
+        teardownCurrent()
+        activityData = null
 
         synchronized(CustomWatcher::class.java) {
             if (instance === this) {
@@ -67,18 +68,14 @@ class CustomWatcher private constructor() {
 
     @Synchronized
     fun run() {
-        if (isDisposed || running) return
+        if (isDisposed) return
+
+        // FIX: always tear down the previous session and start a fresh one.
+        // Before, `running` was never reset, so every launch after the first
+        // returned early and no new watcher was ever started.
+        teardownCurrent()
 
         try {
-            activityWatcher?.let {
-                if (!it.isStopMonitoring) {
-                    it.dispose()
-                }
-            }
-
-            activityWatcher = null
-            robloxDiscordRPC = null
-
             val watcher = ActivityWatcher()
             val rpc = RobloxDiscordRPC(watcher)
 
@@ -95,7 +92,7 @@ class CustomWatcher private constructor() {
         }
     }
 
-     val allHistoryServer: MutableCollection<ActivityData>
+    val allHistoryServer: MutableCollection<ActivityData>
         get() = activityWatcher?.history
             ?.filterNotNull()
             ?.toMutableList()
