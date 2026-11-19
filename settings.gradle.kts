@@ -2,8 +2,9 @@
 
 pluginManagement {
     repositories {
-        gradlePluginPortal()
+        mavenCentral()
         google()
+        gradlePluginPortal()
     }
 }
 
@@ -27,4 +28,3 @@ include(
     ":gateway",
     ":common"
 )
- 
