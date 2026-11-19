@@ -332,28 +332,37 @@ class Bootstrapper(
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
+        val watcherEnabled = App.config.data.serverLocationIndicatorEnabled
+
         handler.post {
             try {
                 if (cancelled.get()) return@post
 
                 closeDialog()
 
-                if (App.config.data.serverLocationIndicatorEnabled) {
-                    try {
-                        // === 修复：在 CustomWatcher 启动前，显式等待 Roblox 日志目录就绪 ===
-                        waitForRobloxLogDirectory()
-                        // ============================================================
-
-                        App.logger.writeLine(log, "launchRoblox(): starting CustomWatcher")
-                        CustomWatcher.getInstance().run()
-                        App.logger.writeLine(log, "launchRoblox(): CustomWatcher started")
-                    } catch (e: Exception) {
-                        App.logger.writeLine(log, "launchRoblox(): CustomWatcher failed")
-                        App.logger.writeException(log, e)
-                    }
-                }
+                // FIX: remember when we launched, start Roblox first, then wait
+                // (off the main thread) for a log file written AFTER this moment
+                // before starting the watcher. Previously we waited before
+                // launching, saw the previous session's log immediately, and the
+                // watcher could attach to a stale file.
+                val launchTime = System.currentTimeMillis()
 
                 context.startActivity(intent)
+
+                if (watcherEnabled) {
+                    Thread {
+                        try {
+                            waitForNewRobloxLog(launchTime)
+
+                            App.logger.writeLine(log, "launchRoblox(): starting CustomWatcher")
+                            CustomWatcher.getInstance().run()
+                            App.logger.writeLine(log, "launchRoblox(): CustomWatcher started")
+                        } catch (e: Exception) {
+                            App.logger.writeLine(log, "launchRoblox(): CustomWatcher failed")
+                            App.logger.writeException(log, e)
+                        }
+                    }.start()
+                }
 
             } catch (e: Exception) {
                 App.logger.writeLine(log, "launchRoblox(): startActivity FAILED")
@@ -371,36 +380,35 @@ class Bootstrapper(
     }
 
     /**
-     * 等待 Roblox 的日志目录出现，最多等待 3 秒。
-     * 替代原先 isRobloxModified 中 ZipFile 操作带来的自然延迟。
+     * Waits (on a background thread) for Roblox to write a log file newer than
+     * [since]. Gives up after [timeoutMs] and proceeds anyway, e.g. when Roblox
+     * was already running and just got resumed.
      */
-    private fun waitForRobloxLogDirectory() {
-        val log = "Bootstrapper::waitForRobloxLogDirectory"
+    private fun waitForNewRobloxLog(since: Long, timeoutMs: Long = 10_000L) {
+        val log = "Bootstrapper::waitForNewRobloxLog"
         val execPath = RobloxClientData().executablePath ?: return
         val logDir = File(execPath, "logs")
+        val deadline = System.currentTimeMillis() + timeoutMs
 
-        var waited = 0L
-        val step = 100L
-        val timeout = 3000L
+        while (System.currentTimeMillis() < deadline) {
+            val fresh = logDir.listFiles()?.any {
+                it.isFile && it.name.endsWith(".log") && it.lastModified() >= since - 1000L
+            } == true
 
-        while (waited < timeout) {
-            if (logDir.exists() && logDir.isDirectory) {
-                val hasLog = logDir.listFiles()?.any { it.isFile && it.name.endsWith(".log") } == true
-                if (hasLog) {
-                    App.logger.writeLine(log, "Roblox log directory ready after ${waited}ms")
-                    return
-                }
+            if (fresh) {
+                App.logger.writeLine(log, "Fresh Roblox log found")
+                return
             }
+
             try {
-                Thread.sleep(step)
+                Thread.sleep(200)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return
             }
-            waited += step
         }
 
-        App.logger.writeLine(log, "Timed out waiting for Roblox log directory, proceeding anyway")
+        App.logger.writeLine(log, "No fresh log within ${timeoutMs}ms, proceeding anyway")
     }
 
     private fun showNotInstalled(context: Context) {
