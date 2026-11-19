@@ -14,11 +14,9 @@ import com.chevstrap.rbx.ui.Frontend
 import com.chevstrap.rbx.ui.IBootstrapperDialog
 import com.chevstrap.rbx.ui.viewModels.GlobalViewModel
 import java.io.File
-import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.zip.ZipFile
 
 class Bootstrapper(
     private val launchMode: LaunchMode
@@ -85,11 +83,7 @@ class Bootstrapper(
                 !checkRobloxInstalled(context)
             ) return
 
-            // 已移除：修改版检测与警告逻辑
-            // if (isRobloxModified(context)) {
-            //     showModifiedWarning(context)
-            //     return
-            // }
+            // 修改版检测已移除，不再阻塞启动
 
             if (cancelled.get()) return cleanup()
 
@@ -268,9 +262,6 @@ class Bootstrapper(
         }
     }
 
-    // 已移除：isRobloxModified 方法
-    // private fun isRobloxModified(context: Context): Boolean { ... }
-
     private fun applyChanges(): Boolean {
         val log = "Bootstrapper::applyChanges"
 
@@ -318,35 +309,21 @@ class Bootstrapper(
         App.logger.writeLine(log, "launchRoblox(): called")
 
         if (pkg.isNullOrEmpty()) {
-            App.logger.writeLine(
-                log,
-                "launchRoblox(): package name is empty"
-            )
+            App.logger.writeLine(log, "launchRoblox(): package name is empty")
             return cleanup()
         }
-
-        App.logger.writeLine(
-            log,
-            "launchRoblox(): package=$pkg"
-        )
 
         val intent = try {
             context.packageManager.getLaunchIntentForPackage(pkg)
         } catch (e: Exception) {
-            App.logger.writeLine(
-                log,
-                "launchRoblox(): failed to get launch intent"
-            )
+            App.logger.writeLine(log, "launchRoblox(): failed to get launch intent")
             App.logger.writeException(log, e)
             cleanup()
             return
         }
 
         if (intent == null) {
-            App.logger.writeLine(
-                log,
-                "launchRoblox(): launch intent is null"
-            )
+            App.logger.writeLine(log, "launchRoblox(): launch intent is null")
             showNotInstalled(context)
             return
         }
@@ -356,105 +333,89 @@ class Bootstrapper(
         }
 
         handler.post {
-            App.logger.writeLine(
-                log,
-                "launchRoblox(): INSIDE handler.post"
-            )
-
             try {
-                if (cancelled.get()) {
-                    App.logger.writeLine(
-                        log,
-                        "launchRoblox(): cancelled before launch"
-                    )
-                    return@post
-                }
+                if (cancelled.get()) return@post
 
                 closeDialog()
 
                 if (App.config.data.serverLocationIndicatorEnabled) {
                     try {
-                        App.logger.writeLine(
-                            log,
-                            "launchRoblox(): starting CustomWatcher"
-                        )
+                        // === 修复：在 CustomWatcher 启动前，显式等待 Roblox 日志目录就绪 ===
+                        waitForRobloxLogDirectory()
+                        // ============================================================
 
+                        App.logger.writeLine(log, "launchRoblox(): starting CustomWatcher")
                         CustomWatcher.getInstance().run()
-
-                        App.logger.writeLine(
-                            log,
-                            "launchRoblox(): CustomWatcher started"
-                        )
+                        App.logger.writeLine(log, "launchRoblox(): CustomWatcher started")
                     } catch (e: Exception) {
-                        App.logger.writeLine(
-                            log,
-                            "launchRoblox(): CustomWatcher failed"
-                        )
+                        App.logger.writeLine(log, "launchRoblox(): CustomWatcher failed")
                         App.logger.writeException(log, e)
                     }
                 }
 
-                App.logger.writeLine(
-                    log,
-                    "launchRoblox(): before startActivity"
-                )
-
                 context.startActivity(intent)
 
-                App.logger.writeLine(
-                    log,
-                    "launchRoblox(): AFTER startActivity"
-                )
-
             } catch (e: Exception) {
-                App.logger.writeLine(
-                    log,
-                    "launchRoblox(): startActivity FAILED"
-                )
+                App.logger.writeLine(log, "launchRoblox(): startActivity FAILED")
                 App.logger.writeException(log, e)
 
                 runCatching {
-                    Frontend.showPlayerErrorDialog(
-                        App.savedFragmentActivity,
-                        e
-                    )
+                    Frontend.showPlayerErrorDialog(App.savedFragmentActivity, e)
                 }.onFailure {
-                    App.logger.writeException(
-                        log,
-                        it as Exception?
-                    )
+                    App.logger.writeException(log, it as Exception?)
                 }
-
             } finally {
                 cleanup()
             }
         }
     }
 
+    /**
+     * 等待 Roblox 的日志目录出现，最多等待 3 秒。
+     * 替代原先 isRobloxModified 中 ZipFile 操作带来的自然延迟。
+     */
+    private fun waitForRobloxLogDirectory() {
+        val log = "Bootstrapper::waitForRobloxLogDirectory"
+        val execPath = RobloxClientData().executablePath ?: return
+        val logDir = File(execPath, "logs")
+
+        var waited = 0L
+        val step = 100L
+        val timeout = 3000L
+
+        while (waited < timeout) {
+            if (logDir.exists() && logDir.isDirectory) {
+                val hasLog = logDir.listFiles()?.any { it.isFile && it.name.endsWith(".log") } == true
+                if (hasLog) {
+                    App.logger.writeLine(log, "Roblox log directory ready after ${waited}ms")
+                    return
+                }
+            }
+            try {
+                Thread.sleep(step)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+            waited += step
+        }
+
+        App.logger.writeLine(log, "Timed out waiting for Roblox log directory, proceeding anyway")
+    }
+
     private fun showNotInstalled(context: Context) {
         handler.post {
             closeDialog()
-
             Frontend.showMessageBox(
                 App.savedFragmentActivity,
-                getTextLocale(
-                    context,
-                    R.string.dialog_not_installed
-                )
+                getTextLocale(context, R.string.dialog_not_installed)
             )
         }
     }
 
-    // 已移除：showModifiedWarning 方法
-    // private fun showModifiedWarning(context: Context) { ... }
-
-    private fun updateStatus(
-        resId: Int,
-        progress: String
-    ) {
+    private fun updateStatus(resId: Int, progress: String) {
         handler.post {
             if (cancelled.get()) return@post
-
             dialog?.let {
                 it.updateStatus(resId, progress)
                 it.setProgress(progress)
@@ -462,22 +423,14 @@ class Bootstrapper(
         }
     }
 
-    private fun simulateProgress(
-        start: Int,
-        end: Int,
-    ) {
+    private fun simulateProgress(start: Int, end: Int) {
         if (cancelled.get()) return
-
         val delay = 1000L / (end - start).coerceAtLeast(1)
         for (progress in start..end) {
             if (cancelled.get()) break
-
             handler.post {
-                if (!cancelled.get()) {
-                    dialog?.setProgress("$progress%")
-                }
+                if (!cancelled.get()) dialog?.setProgress("$progress%")
             }
-
             safeSleep(delay)
         }
     }
@@ -505,22 +458,12 @@ class Bootstrapper(
     private fun cleanup() {
         handler.removeCallbacksAndMessages(null)
         closeDialog()
-
         fragmentManager = null
         packageName = null
-
-        if (App.bootstrapper === this) {
-            App.bootstrapper = null
-        }
+        if (App.bootstrapper === this) App.bootstrapper = null
     }
 
-    private fun getTextLocale(
-        context: Context,
-        resId: Int
-    ): String {
-        return ResourceManagerEx.getStringOrEmpty(
-            context,
-            resId
-        )
+    private fun getTextLocale(context: Context, resId: Int): String {
+        return ResourceManagerEx.getStringOrEmpty(context, resId)
     }
 }
