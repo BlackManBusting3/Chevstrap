@@ -66,8 +66,8 @@ class CustomWatcher private constructor() {
     fun run() {
         if (isDisposed) return
 
-        // ★ FIX: only skip when a watcher is GENUINELY already running.
-        //   The init-created watcher has isStopMonitoring=false but is not running.
+        // Only skip if a watcher is GENUINELY already running. The init-created
+        // watcher has isStopMonitoring=false but was never started.
         val existing = activityWatcher
         if (running && existing != null && !existing.isStopMonitoring) {
             App.logger.writeLine(LOG_IDENTIFIER, "Watcher already running, skipping restart")
@@ -98,11 +98,10 @@ class CustomWatcher private constructor() {
         }
     }
 
-    val allHistoryServer: MutableCollection<*>
-        get() = activityWatcher?.history
-            ?.filterNotNull()
-            ?.toMutableList()
-            ?: mutableListOf()
+    // ★ FIXED: concrete return type so both the inference error and the
+    //   Collection<ActivityData> mismatch in ServerHistoryViewModel go away.
+    val allHistoryServer: MutableList<ActivityData>
+        get() = activityWatcher?.history?.toMutableList() ?: mutableListOf()
 
     companion object {
         private const val LOG_IDENTIFIER = "CustomWatcher"
