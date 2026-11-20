@@ -55,6 +55,7 @@ class ActivityWatcher {
         var lastReadPosition = 0L
         val partialLineBuffer = StringBuilder()
         var lastHeartbeat = System.currentTimeMillis()
+        var lastProgressTime = System.currentTimeMillis()
         val heartbeatIntervalMs = 15_000L
 
         try {
@@ -74,7 +75,7 @@ class ActivityWatcher {
                     val latestLog = getLatestLog(logLocation)
                     if (latestLog == null) {
                         Thread.sleep(500)
-                        maybeHeartbeat(tag, currentLogPath, lastReadPosition, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
+                        maybeHeartbeat(tag, currentLogPath, lastReadPosition, -1L, 0, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
                         continue
                     }
 
@@ -85,68 +86,78 @@ class ActivityWatcher {
                         partialLineBuffer.clear()
                         isInExperience = false
                         data = ActivityData("")
+                        lastProgressTime = System.currentTimeMillis()
                         App.logger.writeLine(tag, "Session state reset for new log")
                     }
 
-                    val fileSize = latestLog.length()
-
-                    if (fileSize < lastReadPosition) {
-                        App.logger.writeLine(tag, "Log shrank ($lastReadPosition -> $fileSize), resetting")
-                        lastReadPosition = 0
-                        partialLineBuffer.clear()
-                        isInExperience = false
-                        data = ActivityData("")
-                    }
-
-                    if (fileSize <= lastReadPosition) {
-                        Thread.sleep(500)
-                        maybeHeartbeat(tag, currentLogPath, lastReadPosition, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
-                        continue
-                    }
-
-                    // ★ CRITICAL FIX: open a FRESH handle on every read.
-                    //   This bypasses DualSpace's stale-FD caching where the
-                    //   OS reports a large file but the FD's read() returns -1.
-                    val toRead = (fileSize - lastReadPosition).coerceAtMost(MAX_CHUNK_SIZE)
-                    val buffer = ByteArray(toRead.toInt())
+                    // ★ ALWAYS try to read from a fresh handle. Never gate on File.length()
+                    //   because DualSpace's overlay FS starts returning 0 for stat() mid-session
+                    //   even though the underlying data remains readable via a fresh FD.
+                    var rafLen = -1L
                     var bytesRead = 0
+                    val buffer = ByteArray(MAX_CHUNK_SIZE.toInt())
 
                     try {
                         RandomAccessFile(latestLog, "r").use { raf ->
+                            rafLen = raf.length()
+
+                            // Only treat as truncation if rafLen is strictly between
+                            // 1 and pos-1. rafLen == 0 is the DualSpace "lying" case
+                            // and we still attempt a read.
+                            if (rafLen in 1 until lastReadPosition) {
+                                App.logger.writeLine(tag, "Truncation detected ($lastReadPosition -> $rafLen), resetting")
+                                lastReadPosition = 0
+                                partialLineBuffer.clear()
+                                isInExperience = false
+                                data = ActivityData("")
+                            }
+
                             raf.seek(lastReadPosition)
                             bytesRead = raf.read(buffer)
                         }
                     } catch (e: IOException) {
-                        App.logger.writeLine(tag, "Failed to read from log: ${e.message}")
+                        App.logger.writeLine(tag, "IO exception opening/reading log: ${e.message}")
                         App.logger.writeException(tag, e)
                         Thread.sleep(500)
                         continue
                     }
 
-                    if (bytesRead <= 0) {
-                        App.logger.writeLine(tag, "WARN: fileSize=$fileSize, pos=$lastReadPosition, but read returned $bytesRead")
-                        Thread.sleep(500)
-                        continue
-                    }
+                    if (bytesRead > 0) {
+                        lastReadPosition += bytesRead
+                        lastProgressTime = System.currentTimeMillis()
 
-                    lastReadPosition += bytesRead
+                        val chunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
+                        partialLineBuffer.append(chunk)
 
-                    val chunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
-                    partialLineBuffer.append(chunk)
-
-                    var idx = partialLineBuffer.indexOf("\n")
-                    while (idx >= 0) {
-                        val line = partialLineBuffer.substring(0, idx).trimEnd('\r')
-                        partialLineBuffer.delete(0, idx + 1)
-                        if (line.isNotEmpty()) {
-                            handleLogEntry(line)
+                        var idx = partialLineBuffer.indexOf("\n")
+                        while (idx >= 0) {
+                            val line = partialLineBuffer.substring(0, idx).trimEnd('\r')
+                            partialLineBuffer.delete(0, idx + 1)
+                            if (line.isNotEmpty()) handleLogEntry(line)
+                            idx = partialLineBuffer.indexOf("\n")
                         }
-                        idx = partialLineBuffer.indexOf("\n")
-                    }
 
-                    if (partialLineBuffer.length > MAX_PARTIAL_LINE) {
-                        App.logger.writeLine(tag, "Partial line buffer exceeded ${MAX_PARTIAL_LINE} chars, discarding")
-                        partialLineBuffer.clear()
+                        if (partialLineBuffer.length > MAX_PARTIAL_LINE) {
+                            App.logger.writeLine(tag, "Partial line buffer exceeded ${MAX_PARTIAL_LINE}, discarding")
+                            partialLineBuffer.clear()
+                        }
+                    } else {
+                        // No data. Detect "stuck at pos with rafLen=0" pattern.
+                        val now = System.currentTimeMillis()
+                        if (lastReadPosition > 0 && rafLen <= 0 &&
+                            (now - lastProgressTime) > STUCK_THRESHOLD_MS) {
+                            App.logger.writeLine(
+                                tag,
+                                "Stuck for >${STUCK_THRESHOLD_MS}ms (rafLen=$rafLen, pos=$lastReadPosition), resetting to 0"
+                            )
+                            lastReadPosition = 0
+                            partialLineBuffer.clear()
+                            isInExperience = false
+                            data = ActivityData("")
+                            lastProgressTime = now
+                        }
+                        Thread.sleep(500)
+                        maybeHeartbeat(tag, currentLogPath, lastReadPosition, rafLen, bytesRead, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
                     }
 
                 } catch (e: IOException) {
@@ -179,18 +190,20 @@ class ActivityWatcher {
         tag: String,
         currentLogPath: String?,
         lastReadPosition: Long,
+        rafLen: Long,
+        lastBytesRead: Int,
         lastHeartbeat: Long,
         intervalMs: Long
     ): Long? {
         val now = System.currentTimeMillis()
         if (now - lastHeartbeat < intervalMs) return null
         val name = currentLogPath?.substringAfterLast('/') ?: "<none>"
-        val fileSize = currentLogPath?.let {
+        val fileLen = currentLogPath?.let {
             try { File(it).length() } catch (_: Exception) { -1L }
         } ?: -1L
         App.logger.writeLine(
             tag,
-            "Heartbeat: file=$name, size=$fileSize, pos=$lastReadPosition"
+            "Heartbeat: file=$name, fileLen=$fileLen, rafLen=$rafLen, pos=$lastReadPosition, lastRead=$lastBytesRead"
         )
         return now
     }
@@ -443,5 +456,6 @@ class ActivityWatcher {
     companion object {
         private const val MAX_CHUNK_SIZE = 64L * 1024L
         private const val MAX_PARTIAL_LINE = 2 * 1024 * 1024
+        private const val STUCK_THRESHOLD_MS = 60_000L
     }
 }
