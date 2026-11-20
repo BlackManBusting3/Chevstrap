@@ -8,6 +8,7 @@ import com.chevstrap.rbx.models.entities.ActivityData
 import com.chevstrap.rbx.ui.NotifyIconWrapper
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.Date
@@ -28,6 +29,9 @@ class ActivityWatcher {
     @Volatile var isEnableRPC = false
         private set
     @Volatile @JvmField var data: ActivityData? = null
+
+    private val processedLines = LinkedHashSet<String>()
+    private var lastProcessedJoinKey: String? = null
 
     private fun start() {
         val tag = "ActivityWatcher::start"
@@ -56,6 +60,8 @@ class ActivityWatcher {
 
         var currentLogPath: String? = null
         var lastReadPosition = 0L
+        var emptyReadStreak = 0
+        var useStreamFallback = false
         val partialLineBuffer = StringBuilder()
         var lastHeartbeat = System.currentTimeMillis()
         var lastProgressTime = System.currentTimeMillis()
@@ -68,7 +74,6 @@ class ActivityWatcher {
             if (initial != null) {
                 currentLogPath = initial.absolutePath
                 val rawLen = try { initial.length() } catch (_: Exception) { 0L }
-                // Rewind up to 16 KB so lines written just before watcher start are not missed
                 lastReadPosition = if (rawLen > INITIAL_REWIND_BYTES) rawLen - INITIAL_REWIND_BYTES else 0L
                 App.logger.writeLine(tag, "Starting from ${initial.name} at pos=$lastReadPosition (rawLen=$rawLen)")
             } else {
@@ -91,6 +96,10 @@ class ActivityWatcher {
                         }
                         currentLogPath = latestLog.absolutePath
                         lastReadPosition = 0L
+                        emptyReadStreak = 0
+                        useStreamFallback = false
+                        processedLines.clear()
+                        lastProcessedJoinKey = null
                         partialLineBuffer.clear()
                         isInExperience = false
                         data = ActivityData("")
@@ -99,17 +108,29 @@ class ActivityWatcher {
                     }
 
                     val buffer = ByteArray(MAX_CHUNK_SIZE.toInt())
-                    val (rafLen, bytesRead) = readFromLogHandle(latestLog, lastReadPosition, buffer) { truncatedTo ->
-                        App.logger.writeLine(tag, "Truncation detected ($lastReadPosition -> $truncatedTo), resetting")
-                        finishActiveActivity(forceClearRpc = true)
-                        lastReadPosition = 0L
-                        partialLineBuffer.clear()
-                        isInExperience = false
-                        data = ActivityData("")
+                    var rafLen = -1L
+                    var bytesRead = -1
+
+                    if (!useStreamFallback) {
+                        val result = readFromLogHandle(latestLog, lastReadPosition, buffer) { truncatedTo ->
+                            App.logger.writeLine(tag, "Truncation detected ($lastReadPosition -> $truncatedTo), resetting")
+                            finishActiveActivity(forceClearRpc = true)
+                            lastReadPosition = 0L
+                            processedLines.clear()
+                            partialLineBuffer.clear()
+                            isInExperience = false
+                            data = ActivityData("")
+                        }
+                        rafLen = result.first
+                        bytesRead = result.second
+                    } else {
+                        val streamResult = readFromStreamFromOffset(latestLog, lastReadPosition, buffer)
+                        bytesRead = streamResult
                     }
 
                     if (bytesRead > 0) {
                         lastReadPosition += bytesRead
+                        emptyReadStreak = 0
                         lastProgressTime = System.currentTimeMillis()
 
                         val chunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
@@ -128,7 +149,24 @@ class ActivityWatcher {
                             partialLineBuffer.clear()
                         }
                     } else {
+                        emptyReadStreak++
                         val now = System.currentTimeMillis()
+
+                        // If RandomAccessFile stops returning new bytes while in experience or after progress,
+                        // switch to FileInputStream re-read from start so new lines in DualSpace VFS are still seen.
+                        if (!useStreamFallback && emptyReadStreak >= STREAM_FALLBACK_CYCLES && lastReadPosition > 0) {
+                            App.logger.writeLine(
+                                tag,
+                                "Read stalled at pos=$lastReadPosition for $emptyReadStreak cycles; switching to stream fallback from 0"
+                            )
+                            useStreamFallback = true
+                            lastReadPosition = 0L
+                            partialLineBuffer.clear()
+                            emptyReadStreak = 0
+                            lastProgressTime = now
+                            continue
+                        }
+
                         if (lastReadPosition > 0 && rafLen <= 0 &&
                             (now - lastProgressTime) > STUCK_THRESHOLD_MS) {
                             App.logger.writeLine(
@@ -137,6 +175,8 @@ class ActivityWatcher {
                             )
                             finishActiveActivity(forceClearRpc = true)
                             lastReadPosition = 0L
+                            useStreamFallback = false
+                            processedLines.clear()
                             partialLineBuffer.clear()
                             isInExperience = false
                             data = ActivityData("")
@@ -146,6 +186,8 @@ class ActivityWatcher {
                         maybeHeartbeat(tag, currentLogPath, lastReadPosition, rafLen, bytesRead, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
                     }
 
+                } catch (e: InterruptedException) {
+                    throw e
                 } catch (e: IOException) {
                     App.logger.writeLine(tag, "IO error during watch")
                     App.logger.writeException(tag, e)
@@ -170,6 +212,23 @@ class ActivityWatcher {
         } finally {
             finishActiveActivity(forceClearRpc = true)
             App.isLastLogFoundOrMaybeNot = true
+        }
+    }
+
+    private fun readFromStreamFromOffset(file: File, offset: Long, buffer: ByteArray): Int {
+        return try {
+            FileInputStream(file).use { fis ->
+                var remaining = offset
+                while (remaining > 0) {
+                    val skipped = fis.skip(remaining)
+                    if (skipped <= 0) break
+                    remaining -= skipped
+                }
+                fis.read(buffer)
+            }
+        } catch (e: IOException) {
+            App.logger.writeLine("ActivityWatcher::readFromStreamFromOffset", "Stream read error: ${e.message}")
+            -1
         }
     }
 
@@ -266,6 +325,7 @@ class ActivityWatcher {
         }
 
         isInExperience = false
+        lastProcessedJoinKey = null
         data = ActivityData("")
 
         App.appContext?.let {
@@ -305,6 +365,19 @@ class ActivityWatcher {
             line.contains("shutdownPlayer")
     }
 
+    private fun isDuplicateLine(line: String): Boolean {
+        if (processedLines.contains(line)) return true
+        if (processedLines.size >= MAX_PROCESSED_LINES) {
+            val iter = processedLines.iterator()
+            if (iter.hasNext()) {
+                iter.next()
+                iter.remove()
+            }
+        }
+        processedLines.add(line)
+        return false
+    }
+
     private fun handleLogEntry(line: String) {
         val tag = "ActivityWatcher::handleLogEntry"
         val joinServer = "Joining game '"
@@ -316,18 +389,15 @@ class ActivityWatcher {
         val matchesAny = line.contains(joinServer) || left ||
             line.contains(connection) || line.contains(bsRPC) || line.contains(universe)
         if (!matchesAny) return
+        if (isDuplicateLine(line)) return
 
         App.logger.writeLine(tag, "Matched line: $line")
-
-        if (line.contains(joinServer) && (isInExperience || (data?.placeId ?: 0L) != 0L)) {
-            App.logger.writeLine(tag, "New join detected while previous session open; closing previous session first")
-            finishActiveActivity(forceClearRpc = true)
-        }
 
         val activityData = data ?: ActivityData("").also { data = it }
 
         try {
             if (left) {
+                if (!isInExperience && activityData.placeId == 0L) return
                 App.logger.writeLine(tag, "Leave trigger matched")
                 finishActiveActivity(forceClearRpc = true)
                 return
@@ -341,13 +411,24 @@ class ActivityWatcher {
                     val serverIP = match.groupValues[3].trim()
 
                     if (jobId.isNotEmpty() && placeId != null) {
+                        val joinKey = "$placeId:$jobId"
+                        if (isInExperience && joinKey == lastProcessedJoinKey) {
+                            return
+                        }
+                        if (isInExperience || activityData.placeId != 0L) {
+                            App.logger.writeLine(tag, "New join detected while previous session open; closing previous session first")
+                            finishActiveActivity(forceClearRpc = true)
+                        }
+
+                        val freshData = ActivityData("").also { data = it }
+                        lastProcessedJoinKey = joinKey
                         App.logger.writeLine(tag, "Joining game: placeId=$placeId, jobId=$jobId, ip=$serverIP")
                         isInExperience = true
-                        activityData.timeJoined = Date()
-                        activityData.placeId = placeId
-                        activityData.jobId = jobId
-                        activityData.machineAddress = serverIP
-                        updateServerType(activityData)
+                        freshData.timeJoined = Date()
+                        freshData.placeId = placeId
+                        freshData.jobId = jobId
+                        freshData.machineAddress = serverIP
+                        updateServerType(freshData)
 
                         val rpc = discordRPC ?: CustomWatcher.getInstance().robloxDiscordRPC
                         App.logger.writeLine(tag, "Calling setCurrentGame on join (rpcNull=${rpc == null}, isEnableRPC=$isEnableRPC)")
@@ -412,7 +493,6 @@ class ActivityWatcher {
                 App.logger.writeLine(tag, "BloxstrapRPC line seen: isInExperience=$isInExperience, allowCustom=$allowCustom, isEnableRPC=$isEnableRPC")
                 if (!allowCustom) return
 
-                // If the join line was missed before watcher attached, mark session active so RPC updates
                 if (!isInExperience) {
                     isInExperience = true
                 }
@@ -478,5 +558,7 @@ class ActivityWatcher {
         private const val MAX_CHUNK_SIZE = 64L * 1024L
         private const val MAX_PARTIAL_LINE = 2 * 1024 * 1024
         private const val STUCK_THRESHOLD_MS = 60_000L
+        private const val STREAM_FALLBACK_CYCLES = 10
+        private const val MAX_PROCESSED_LINES = 2000
     }
 }
