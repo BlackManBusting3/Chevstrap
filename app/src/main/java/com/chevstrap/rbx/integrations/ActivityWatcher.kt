@@ -51,112 +51,120 @@ class ActivityWatcher {
         }
         App.logger.writeLine(tag, "Watching logs from ${logLocation.absolutePath}")
 
-        var randomAccessFile: RandomAccessFile? = null
         var currentLogPath: String? = null
-
+        var lastReadPosition = 0L
+        val partialLineBuffer = StringBuilder()
         var lastHeartbeat = System.currentTimeMillis()
         val heartbeatIntervalMs = 15_000L
-        var consecutiveNullReads = 0
 
         try {
             App.isLastLogFoundOrMaybeNot = true
-            var latestLog = getLatestLog(logLocation)
 
-            if (latestLog != null) {
-                currentLogPath = latestLog.absolutePath
-                randomAccessFile = RandomAccessFile(latestLog, "r")
-                randomAccessFile.seek(randomAccessFile.length())
-                App.logger.writeLine(tag, "Starting from EOF: ${latestLog.name} (${randomAccessFile.length()} bytes)")
+            val initial = getLatestLog(logLocation)
+            if (initial != null) {
+                currentLogPath = initial.absolutePath
+                lastReadPosition = initial.length()
+                App.logger.writeLine(tag, "Starting from EOF: ${initial.name} ($lastReadPosition bytes)")
             } else {
                 App.logger.writeLine(tag, "No existing Roblox log found. Waiting for a new log...")
             }
 
             while (!isStopMonitoring) {
                 try {
-                    latestLog = getLatestLog(logLocation)
+                    val latestLog = getLatestLog(logLocation)
                     if (latestLog == null) {
                         Thread.sleep(500)
-                        maybeHeartbeat(tag, currentLogPath, randomAccessFile, consecutiveNullReads, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
+                        maybeHeartbeat(tag, currentLogPath, lastReadPosition, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
                         continue
                     }
 
                     if (currentLogPath != latestLog.absolutePath) {
                         App.logger.writeLine(tag, "Detected new Roblox log: ${latestLog.name}")
+                        currentLogPath = latestLog.absolutePath
+                        lastReadPosition = 0
+                        partialLineBuffer.clear()
                         isInExperience = false
                         data = ActivityData("")
-                        consecutiveNullReads = 0
                         App.logger.writeLine(tag, "Session state reset for new log")
+                    }
 
-                        try { randomAccessFile?.close() } catch (_: IOException) {}
-                        try {
-                            val newLogFile = RandomAccessFile(latestLog, "r")
-                            newLogFile.seek(0)
-                            randomAccessFile = newLogFile
-                            currentLogPath = latestLog.absolutePath
-                            App.logger.writeLine(tag, "Now watching: ${latestLog.name}")
-                        } catch (e: IOException) {
-                            App.logger.writeLine(tag, "Failed to open new Roblox log: ${latestLog.absolutePath}")
-                            App.logger.writeException(tag, e)
-                            randomAccessFile = null
-                            Thread.sleep(500)
-                        }
+                    val fileSize = latestLog.length()
+
+                    if (fileSize < lastReadPosition) {
+                        App.logger.writeLine(tag, "Log shrank ($lastReadPosition -> $fileSize), resetting")
+                        lastReadPosition = 0
+                        partialLineBuffer.clear()
+                        isInExperience = false
+                        data = ActivityData("")
+                    }
+
+                    if (fileSize <= lastReadPosition) {
+                        Thread.sleep(500)
+                        maybeHeartbeat(tag, currentLogPath, lastReadPosition, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
                         continue
                     }
 
-                    if (randomAccessFile == null) {
-                        try {
-                            val newLogFile = RandomAccessFile(latestLog, "r")
-                            newLogFile.seek(newLogFile.length())
-                            randomAccessFile = newLogFile
-                            currentLogPath = latestLog.absolutePath
-                        } catch (e: IOException) {
-                            App.logger.writeLine(tag, "Failed to reopen Roblox log: ${latestLog.absolutePath}")
-                            App.logger.writeException(tag, e)
-                            Thread.sleep(500)
-                            continue
+                    // ★ CRITICAL FIX: open a FRESH handle on every read.
+                    //   This bypasses DualSpace's stale-FD caching where the
+                    //   OS reports a large file but the FD's read() returns -1.
+                    val toRead = (fileSize - lastReadPosition).coerceAtMost(MAX_CHUNK_SIZE)
+                    val buffer = ByteArray(toRead.toInt())
+                    var bytesRead = 0
+
+                    try {
+                        RandomAccessFile(latestLog, "r").use { raf ->
+                            raf.seek(lastReadPosition)
+                            bytesRead = raf.read(buffer)
                         }
-                    }
-
-                    if (randomAccessFile.length() < randomAccessFile.filePointer) {
-                        App.logger.writeLine(tag, "Log file was truncated. Resetting reader.")
-                        randomAccessFile.seek(0)
-                    }
-
-                    var hasReadData = false
-                    while (!isStopMonitoring) {
-                        val line = randomAccessFile.readLine() ?: break
-                        hasReadData = true
-                        consecutiveNullReads = 0
-                        val decodedLine = try {
-                            String(line.toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8)
-                        } catch (_: Exception) { line }
-                        handleLogEntry(decodedLine)
-                    }
-                    if (!hasReadData) {
-                        consecutiveNullReads++
+                    } catch (e: IOException) {
+                        App.logger.writeLine(tag, "Failed to read from log: ${e.message}")
+                        App.logger.writeException(tag, e)
                         Thread.sleep(500)
-                        maybeHeartbeat(tag, currentLogPath, randomAccessFile, consecutiveNullReads, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
+                        continue
+                    }
+
+                    if (bytesRead <= 0) {
+                        App.logger.writeLine(tag, "WARN: fileSize=$fileSize, pos=$lastReadPosition, but read returned $bytesRead")
+                        Thread.sleep(500)
+                        continue
+                    }
+
+                    lastReadPosition += bytesRead
+
+                    val chunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
+                    partialLineBuffer.append(chunk)
+
+                    var idx = partialLineBuffer.indexOf("\n")
+                    while (idx >= 0) {
+                        val line = partialLineBuffer.substring(0, idx).trimEnd('\r')
+                        partialLineBuffer.delete(0, idx + 1)
+                        if (line.isNotEmpty()) {
+                            handleLogEntry(line)
+                        }
+                        idx = partialLineBuffer.indexOf("\n")
+                    }
+
+                    if (partialLineBuffer.length > MAX_PARTIAL_LINE) {
+                        App.logger.writeLine(tag, "Partial line buffer exceeded ${MAX_PARTIAL_LINE} chars, discarding")
+                        partialLineBuffer.clear()
                     }
 
                 } catch (e: IOException) {
-                    App.logger.writeLine(tag, "IO error during watch, reopening log")
+                    App.logger.writeLine(tag, "IO error during watch")
                     App.logger.writeException(tag, e)
-                    try { randomAccessFile?.close() } catch (_: IOException) {}
-                    randomAccessFile = null
-                    currentLogPath = null
                     Thread.sleep(1000)
                 } catch (e: Exception) {
-                    App.logger.writeLine(tag, "Unexpected exception in watch loop, continuing")
+                    App.logger.writeLine(tag, "Unexpected exception in watch loop")
                     App.logger.writeException(tag, e)
                     Thread.sleep(1000)
                 }
             }
         } catch (e: InterruptedException) {
             if (!isStopMonitoring) {
-                App.logger.writeLine(tag, "Activity watcher interrupted unexpectedly.")
+                App.logger.writeLine(tag, "Activity watcher interrupted unexpectedly")
                 App.logger.writeException(tag, e)
             } else {
-                App.logger.writeLine(tag, "Activity watcher stopped.")
+                App.logger.writeLine(tag, "Activity watcher stopped")
             }
             Thread.currentThread().interrupt()
         } catch (e: Exception) {
@@ -164,26 +172,25 @@ class ActivityWatcher {
             App.logger.writeException(tag, e)
         } finally {
             App.isLastLogFoundOrMaybeNot = true
-            closeRandomAccessFile(randomAccessFile)
         }
     }
 
     private fun maybeHeartbeat(
         tag: String,
         currentLogPath: String?,
-        raf: RandomAccessFile?,
-        consecutiveNullReads: Int,
+        lastReadPosition: Long,
         lastHeartbeat: Long,
         intervalMs: Long
     ): Long? {
         val now = System.currentTimeMillis()
         if (now - lastHeartbeat < intervalMs) return null
-        val size = try { raf?.length() ?: -1L } catch (_: Exception) { -1L }
-        val ptr = try { raf?.filePointer ?: -1L } catch (_: Exception) { -1L }
         val name = currentLogPath?.substringAfterLast('/') ?: "<none>"
+        val fileSize = currentLogPath?.let {
+            try { File(it).length() } catch (_: Exception) { -1L }
+        } ?: -1L
         App.logger.writeLine(
             tag,
-            "Heartbeat: file=$name, size=$size, ptr=$ptr, nullReads=$consecutiveNullReads"
+            "Heartbeat: file=$name, size=$fileSize, pos=$lastReadPosition"
         )
         return now
     }
@@ -197,10 +204,6 @@ class ActivityWatcher {
             App.logger.writeException("ActivityWatcher::getLatestLog", e)
             null
         }
-    }
-
-    private fun closeRandomAccessFile(file: RandomAccessFile?) {
-        try { file?.close() } catch (_: IOException) {}
     }
 
     private fun updateServerType(activityData: ActivityData) {
@@ -435,5 +438,10 @@ class ActivityWatcher {
             App.logger.writeLine(tag, "Failed to submit task")
             App.logger.writeException(tag, e)
         }
+    }
+
+    companion object {
+        private const val MAX_CHUNK_SIZE = 64L * 1024L
+        private const val MAX_PARTIAL_LINE = 2 * 1024 * 1024
     }
 }
