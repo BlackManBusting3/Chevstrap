@@ -4,7 +4,7 @@ import com.chevstrap.rbx.App
 import com.chevstrap.rbx.CustomWatcher
 import com.chevstrap.rbx.appDirectories.RobloxClientData
 import com.chevstrap.rbx.enums.ServerType
-import com.chevstrap.rbx.models.entities.data.ActivityData
+import com.chevstrap.rbx.models.entities.ActivityData
 import com.chevstrap.rbx.ui.NotifyIconWrapper
 import org.json.JSONObject
 import java.io.File
