@@ -123,8 +123,12 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     }
 
     init {
+        val token = PrefsManager.getToken()
+        if (token.isBlank()) {
+            App.logger.writeLine("RobloxDiscordRPC::init", "WARNING: Discord token is empty; Rich Presence will not connect until a token is set")
+        }
         discordRichPresence?.setSession(
-            PrefsManager.getToken(),
+            token,
             PrefsManager.getStatus()
         )
         registerListener()
@@ -430,6 +434,11 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
 
     fun setVisibility(visible: Boolean) {
         if (isDisposed) return
+        App.logger.writeLine(
+            "RobloxDiscordRPC::setVisibility",
+            "Visibility toggled to=$visible, current=$isVisible, disposed=$isDisposed, " +
+                "inExperience=${activityWatcher.isInExperienceState()}"
+        )
         visibilityJob?.cancel()
         visibilityJob = visibilityScope.launch {
             delay(1000.milliseconds)
@@ -446,6 +455,12 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     private fun updatePresence() {
         if (isDisposed || !isVisible) return
         if (currentPresence.isNullOrEmpty() || !activityWatcher.isInExperienceState()) {
+            App.logger.writeLine(
+                "RobloxDiscordRPC::updatePresence",
+                "Clearing RPC (disposed=$isDisposed, visible=$isVisible, ready=$discordReady, " +
+                    "presenceEmpty=${currentPresence.isNullOrEmpty()}, " +
+                    "inExperience=${activityWatcher.isInExperienceState()})"
+            )
             clearRPC()
             return
         }
@@ -462,6 +477,15 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         } catch (e: Exception) {
             App.logger.writeException("RobloxDiscordRPC::clearRPC", e)
         }
+    }
+
+    fun resetSessionState() {
+        lastGameKey = null
+        currentGameStartTime = null
+        customMessageRPC = null
+        lastRPCSignatures.clear()
+        lastRPCMessageTimes.clear()
+        App.logger.writeLine("RobloxDiscordRPC::resetSessionState", "Per-session RPC state reset")
     }
 
     private fun addToThumbnailCache(key: String, value: String) {

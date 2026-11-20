@@ -42,6 +42,7 @@ class ActivityWatcher {
             App.isLastLogFoundOrMaybeNot = true
             return
         }
+        App.logger.writeLine(tag, "Resolved Roblox executable path: $execPath")
 
         isEnableRPC = App.config.data.showGameActivity
         discordRPC = CustomWatcher.getInstance().robloxDiscordRPC
@@ -84,6 +85,7 @@ class ActivityWatcher {
                 try {
                     val latestLog = getLatestLog(logLocation)
                     if (latestLog == null) {
+                        App.logger.writeLine(tag, "No Roblox log file found in $logLocation")
                         Thread.sleep(500)
                         maybeHeartbeat(tag, currentLogPath, lastReadPosition, -1L, 0, lastHeartbeat, heartbeatIntervalMs)?.let { lastHeartbeat = it }
                         continue
@@ -336,6 +338,7 @@ class ActivityWatcher {
         if (isEnableRPC || forceClearRpc) {
             val rpc = discordRPC ?: CustomWatcher.getInstance().robloxDiscordRPC
             App.logger.writeLine(tag, "Clearing RPC (rpcNull=${rpc == null}, force=$forceClearRpc)")
+            rpc?.resetSessionState()
             rpc?.setCurrentGame()
         }
     }
@@ -476,10 +479,10 @@ class ActivityWatcher {
                     line.substring(universeStart, universeEnd).trim().toLongOrNull()?.let { universeId ->
                         App.logger.writeLine(tag, "Parsed universeId=$universeId, fetching details")
                         activityData.setUniverseId(universeId) { success ->
-                            if (success && isInExperience && data === activityData) {
+                            if (isInExperience && data === activityData) {
                                 updateServerType(activityData)
                                 val rpc = discordRPC ?: CustomWatcher.getInstance().robloxDiscordRPC
-                                App.logger.writeLine(tag, "Universe details loaded, refreshing RPC (rpcNull=${rpc == null})")
+                                App.logger.writeLine(tag, "Universe details ${if (success) "loaded" else "failed to load"}, refreshing RPC (rpcNull=${rpc == null}, success=$success)")
                                 if (isEnableRPC) rpc?.setCurrentGame()
                             }
                         }

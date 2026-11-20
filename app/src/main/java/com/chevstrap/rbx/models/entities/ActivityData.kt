@@ -51,6 +51,7 @@ class ActivityData(machineAddress: String? = "") {
                     isTeleport = true
                 }
 
+                lastUniverseId = detailsData.id
                 rootPlaceId = detailsData.rootPlaceId
                 isUniverseDetailsFetched = true
 
@@ -73,7 +74,7 @@ class ActivityData(machineAddress: String? = "") {
             App.logger.writeLine(LOG_IDENTIFIER, "Root place ID set to $value")
         }
 
-    private val lastUniverseId: Long = 0
+    private var lastUniverseId: Long = 0
 
     var placeId: Long = 0
         set(value) {
