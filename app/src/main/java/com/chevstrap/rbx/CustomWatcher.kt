@@ -43,6 +43,7 @@ class CustomWatcher private constructor() {
         App.logger.writeLine(LOG_IDENTIFIER, "Disposing CustomWatcher")
 
         val watcher = activityWatcher
+        val rpc = robloxDiscordRPC
         activityWatcher = null
         robloxDiscordRPC = null
         activityData = null
@@ -51,6 +52,12 @@ class CustomWatcher private constructor() {
             if (watcher != null && !watcher.isStopMonitoring) {
                 watcher.dispose()
             }
+        } catch (ex: Exception) {
+            App.logger.writeException(LOG_IDENTIFIER, ex)
+        }
+
+        try {
+            rpc?.dispose()
         } catch (ex: Exception) {
             App.logger.writeException(LOG_IDENTIFIER, ex)
         }
@@ -76,6 +83,7 @@ class CustomWatcher private constructor() {
             existing?.let {
                 if (!it.isStopMonitoring) it.dispose()
             }
+            robloxDiscordRPC?.dispose()
             activityWatcher = null
             robloxDiscordRPC = null
 
