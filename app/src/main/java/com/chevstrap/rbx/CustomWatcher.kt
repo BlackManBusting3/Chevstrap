@@ -5,7 +5,6 @@ import com.chevstrap.rbx.integrations.RobloxDiscordRPC
 import com.chevstrap.rbx.models.entities.ActivityData
 
 class CustomWatcher private constructor() {
-
     @JvmField
     var activityData: ActivityData? = null
 
@@ -20,18 +19,33 @@ class CustomWatcher private constructor() {
 
     private var running = false
 
-    // FIX: the old init { createWatcher() } was removed. It created an extra
-    // ActivityWatcher + RobloxDiscordRPC (a second Discord gateway session) that
-    // run() later dropped without ever disposing.
+    init {
+        createWatcher()
+    }
 
-    /** Stops and releases the current watcher + RPC (safe to call repeatedly). */
-    private fun teardownCurrent() {
+    private fun createWatcher() {
+        try {
+            val watcher = ActivityWatcher()
+            activityWatcher = watcher
+            robloxDiscordRPC = RobloxDiscordRPC(watcher)
+        } catch (ex: Exception) {
+            App.logger.writeException(LOG_IDENTIFIER, ex)
+            activityWatcher = null
+            robloxDiscordRPC = null
+        }
+    }
+
+    @Synchronized
+    fun dispose() {
+        if (isDisposed) return
+        isDisposed = true
+        running = false
+        App.logger.writeLine(LOG_IDENTIFIER, "Disposing CustomWatcher")
+
         val watcher = activityWatcher
-        val rpc = robloxDiscordRPC
-
         activityWatcher = null
         robloxDiscordRPC = null
-        running = false
+        activityData = null
 
         try {
             if (watcher != null && !watcher.isStopMonitoring) {
@@ -40,24 +54,6 @@ class CustomWatcher private constructor() {
         } catch (ex: Exception) {
             App.logger.writeException(LOG_IDENTIFIER, ex)
         }
-
-        try {
-            rpc?.dispose()
-        } catch (ex: Exception) {
-            App.logger.writeException(LOG_IDENTIFIER, ex)
-        }
-    }
-
-    @Synchronized
-    fun dispose() {
-        if (isDisposed) return
-
-        isDisposed = true
-
-        App.logger.writeLine(LOG_IDENTIFIER, "Disposing CustomWatcher")
-
-        teardownCurrent()
-        activityData = null
 
         synchronized(CustomWatcher::class.java) {
             if (instance === this) {
@@ -70,19 +66,29 @@ class CustomWatcher private constructor() {
     fun run() {
         if (isDisposed) return
 
-        // FIX: always tear down the previous session and start a fresh one.
-        // Before, `running` was never reset, so every launch after the first
-        // returned early and no new watcher was ever started.
-        teardownCurrent()
+        // ★ FIX: only skip when a watcher is GENUINELY already running.
+        //   The init-created watcher has isStopMonitoring=false but is not running.
+        val existing = activityWatcher
+        if (running && existing != null && !existing.isStopMonitoring) {
+            App.logger.writeLine(LOG_IDENTIFIER, "Watcher already running, skipping restart")
+            return
+        }
 
         try {
+            existing?.let {
+                if (!it.isStopMonitoring) it.dispose()
+            }
+            activityWatcher = null
+            robloxDiscordRPC = null
+
             val watcher = ActivityWatcher()
             val rpc = RobloxDiscordRPC(watcher)
 
             activityWatcher = watcher
             robloxDiscordRPC = rpc
-
             running = true
+
+            App.logger.writeLine(LOG_IDENTIFIER, "Starting new ActivityWatcher")
             watcher.runWatcher()
         } catch (ex: Exception) {
             running = false
@@ -92,7 +98,7 @@ class CustomWatcher private constructor() {
         }
     }
 
-    val allHistoryServer: MutableCollection<ActivityData>
+    val allHistoryServer: MutableCollection<*>
         get() = activityWatcher?.history
             ?.filterNotNull()
             ?.toMutableList()
@@ -100,15 +106,12 @@ class CustomWatcher private constructor() {
 
     companion object {
         private const val LOG_IDENTIFIER = "CustomWatcher"
-
         private var instance: CustomWatcher? = null
 
         @JvmStatic
         fun getInstance(): CustomWatcher {
             synchronized(CustomWatcher::class.java) {
-                return instance ?: CustomWatcher().also {
-                    instance = it
-                }
+                return instance ?: CustomWatcher().also { instance = it }
             }
         }
     }
