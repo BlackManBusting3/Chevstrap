@@ -47,6 +47,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         removeSmallModeListener()
+        if (isFinishing) {
+            CustomWatcher.getInstance().dispose()
+        }
+        if (App.savedMainActivity === this) {
+            App.savedMainActivity = null
+        }
 
         super.onDestroy()
     }
