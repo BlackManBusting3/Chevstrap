@@ -39,9 +39,9 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     private val visibilityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var presenceJob: Job? = null
     private var visibilityJob: Job? = null
-    private var isDisposed = false
-    private var isVisible = true
-    private var discordReady = false
+    @Volatile private var isDisposed = false
+    @Volatile private var isVisible = true
+    @Volatile private var discordReady = false
     private var currentPresence: String? = null
     private var currentGameStartTime: Long? = null
     private var lastGameKey: String? = null
@@ -93,16 +93,31 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
                         "RobloxDiscordRPC::onReady",
                         "Received ready from user ${user?.optString("username")}"
                     )
-                    updatePresence()
+                    if (activityWatcher.isInExperienceState() && isVisible) {
+                        setCurrentGame()
+                    } else {
+                        clearRPC()
+                    }
                 }
+
                 override fun onPresenceUpdate() {}
+
                 override fun onError(message: String, throwable: Throwable?) {
                     App.logger.writeLine("RobloxDiscordRPC::onError", "An RPC error occurred - $message")
                     throwable?.let { App.logger.writeException("Discord RPC error", it as Exception?) }
                 }
-                override fun onConnectionEstablished() { discordReady = false }
-                override fun onConnectionFailed() { discordReady = false }
-                override fun onClose(reason: String, code: Int) { discordReady = false }
+
+                override fun onConnectionEstablished() {
+                    discordReady = false
+                }
+
+                override fun onConnectionFailed() {
+                    discordReady = false
+                }
+
+                override fun onClose(reason: String, code: Int) {
+                    discordReady = false
+                }
             }
         )
     }
@@ -116,17 +131,22 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     }
 
     fun setCurrentGame() {
-        if (isDisposed || !App.config.data.showGameActivity) return
+        if (isDisposed) return
 
-        if (!activityWatcher.isInExperienceState()) {
-            App.logger.writeLine("RobloxDiscordRPC::setCurrentGame", "Not in experience; clearing RPC")
+        if (!App.config.data.showGameActivity || !activityWatcher.isInExperienceState()) {
+            App.logger.writeLine(
+                "RobloxDiscordRPC::setCurrentGame",
+                "Clearing RPC (showGameActivity=${App.config.data.showGameActivity}, inExperience=${activityWatcher.isInExperienceState()})"
+            )
             presenceJob?.cancel()
             presenceJob = null
             customMessageRPC = null
             currentPresence = null
             currentGameStartTime = null
             lastGameKey = null
-            updatePresence()
+            lastRPCSignatures.clear()
+            lastRPCMessageTimes.clear()
+            clearRPC()
             return
         }
 
@@ -135,9 +155,10 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         if (gameKey != null && gameKey != lastGameKey) {
             App.logger.writeLine(
                 "RobloxDiscordRPC::setCurrentGame",
-                "Game changed (${lastGameKey} -> $gameKey); resetting per-session state"
+                "Game changed ($lastGameKey -> $gameKey); resetting per-session state & custom RPC"
             )
             lastGameKey = gameKey
+            customMessageRPC = null
             currentGameStartTime = null
             lastRPCSignatures.clear()
             lastRPCMessageTimes.clear()
@@ -148,7 +169,12 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
             try {
                 ensureActive()
                 val data = activityWatcher.getActivityData() ?: return@launch
-                val rpcData = customMessageRPC
+                if (!activityWatcher.isInExperienceState()) {
+                    clearRPC()
+                    return@launch
+                }
+
+                val rpcData = if (App.config.data.discordAllowCustomPresence) customMessageRPC else null
                 val custom = parseCustomPresence(rpcData)
                 val detailsData = data.universeDetails?.data
                 val gameName = detailsData?.name.orEmpty()
@@ -210,6 +236,11 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
                 )
 
                 ensureActive()
+                if (!activityWatcher.isInExperienceState()) {
+                    clearRPC()
+                    return@launch
+                }
+
                 currentPresence = jsonFormatter.encodeToString(presence)
                 App.logger.writeLine("RobloxDiscordRPC::setCurrentGame", "Prepared Rich Presence: $currentPresence")
                 updatePresence()
@@ -225,7 +256,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         if (data == null) return null
         fun text(key: String): String? {
             if (!data.has(key)) return null
-            return data.optString(key).takeIf { it.isNotBlank() && it != "" }
+            return data.optString(key).takeIf { it.isNotBlank() }
         }
         fun image(key: String): Pair<String?, String?> {
             val obj = data.optJSONObject(key) ?: return null to null
@@ -275,7 +306,11 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
             try {
                 val userDetails = UserDetails.fetch(activityData.userId)
                 userDetails.thumbnail?.imageUrl?.let { fetchCachedThumbnail(it) }
-            } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         } else null
 
         val large = rpcData?.optJSONObject("largeImage")?.optString("assetId")
@@ -313,7 +348,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     }
 
     fun processRPCMessage(message: JSONObject) {
-        if (isDisposed) return
+        if (isDisposed || !activityWatcher.isInExperienceState()) return
         val command = message.optString("command")
         App.logger.writeLine("RobloxDiscordRPC::processRPCMessage", "Received RPC command: '$command'")
         when (command) {
@@ -323,7 +358,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     }
 
     private fun processSetRichPresence(message: JSONObject) {
-        if (isDisposed || !App.config.data.discordAllowCustomPresence) return
+        if (isDisposed || !App.config.data.discordAllowCustomPresence || !activityWatcher.isInExperienceState()) return
         val activityData = activityWatcher.getActivityData() ?: return
         val creator = activityData.universeDetails?.data?.creator
 
@@ -359,12 +394,13 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
 
     private fun sanitizeImage(data: JSONObject, key: String) {
         val image = data.optJSONObject(key) ?: return
-        if (image.optBoolean("reset")) { data.remove(key); return }
-        if (image.optBoolean("clear")) data.remove(key)
+        if (image.optBoolean("reset") || image.optBoolean("clear")) {
+            data.remove(key)
+        }
     }
 
     private fun processSetLaunchData(message: JSONObject) {
-        if (isDisposed) return
+        if (isDisposed || !activityWatcher.isInExperienceState()) return
         val data = message.optString("data").takeIf { it.isNotBlank() } ?: return
         if (data.length > 200) return
         activityWatcher.getActivityData()?.rpcLaunchData = data
@@ -399,7 +435,11 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
             delay(1000.milliseconds)
             if (isDisposed) return@launch
             isVisible = visible
-            if (visible) setCurrentGame() else clearRPC()
+            if (visible && activityWatcher.isInExperienceState()) {
+                setCurrentGame()
+            } else {
+                clearRPC()
+            }
         }
     }
 
@@ -416,13 +456,11 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
 
     private fun clearRPC() {
         currentPresence = null
-        if (discordReady) {
+        App.logger.writeLine("RobloxDiscordRPC::clearRPC", "Clearing Discord Rich Presence (ready=$discordReady)")
+        try {
             discordRichPresence?.clearRPC()
-        } else {
-            App.logger.writeLine(
-                "RobloxDiscordRPC::clearRPC",
-                "Discord gateway not ready; clear will be applied when it becomes ready"
-            )
+        } catch (e: Exception) {
+            App.logger.writeException("RobloxDiscordRPC::clearRPC", e)
         }
     }
 
@@ -453,7 +491,12 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         thumbnailCache.clear()
         lastRPCSignatures.clear()
         lastRPCMessageTimes.clear()
-        discordRichPresence?.stopRPC()
+        try {
+            discordRichPresence?.clearRPC()
+        } catch (_: Exception) {}
+        try {
+            discordRichPresence?.stopRPC()
+        } catch (_: Exception) {}
         discordRichPresence = null
         presenceScope.cancel()
         visibilityScope.cancel()
