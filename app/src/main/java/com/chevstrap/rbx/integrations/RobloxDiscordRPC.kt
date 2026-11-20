@@ -44,7 +44,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
     private var discordReady = false
     private var currentPresence: String? = null
     private var currentGameStartTime: Long? = null
-    private var lastGameKey: String? = null            // ★ track which game the timer belongs to
+    private var lastGameKey: String? = null
     private var customMessageRPC: JSONObject? = null
     private val rpcSpamLock = Any()
     private val thumbnailCache: ConcurrentMap<String, String> = ConcurrentHashMap()
@@ -119,6 +119,7 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
         if (isDisposed || !App.config.data.showGameActivity) return
 
         if (!activityWatcher.isInExperienceState()) {
+            App.logger.writeLine("RobloxDiscordRPC::setCurrentGame", "Not in experience; clearing RPC")
             presenceJob?.cancel()
             presenceJob = null
             customMessageRPC = null
@@ -129,11 +130,13 @@ class RobloxDiscordRPC(private val activityWatcher: ActivityWatcher) {
             return
         }
 
-        // ★ FIX: if the game identity changed, discard per‑game state so the
-        //   timestamp and signature caches cannot leak from the previous game.
         val activityData = activityWatcher.getActivityData()
         val gameKey = activityData?.let { "${it.placeId}:${it.universeId}" }
         if (gameKey != null && gameKey != lastGameKey) {
+            App.logger.writeLine(
+                "RobloxDiscordRPC::setCurrentGame",
+                "Game changed (${lastGameKey} -> $gameKey); resetting per-session state"
+            )
             lastGameKey = gameKey
             currentGameStartTime = null
             lastRPCSignatures.clear()
