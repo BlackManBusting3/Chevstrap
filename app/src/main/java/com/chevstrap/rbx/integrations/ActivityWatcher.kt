@@ -1,6 +1,5 @@
 package com.chevstrap.rbx.integrations
 
-import chevstrap.extensions.FileTool
 import com.chevstrap.rbx.App
 import com.chevstrap.rbx.CustomWatcher
 import com.chevstrap.rbx.appDirectories.RobloxClientData
@@ -25,7 +24,9 @@ class ActivityWatcher {
     @Volatile var isStopMonitoring = false
         private set
     @Volatile var isInExperience = false
+        private set
     @Volatile var isEnableRPC = false
+        private set
     @Volatile @JvmField var data: ActivityData? = null
 
     private fun start() {
@@ -139,11 +140,12 @@ class ActivityWatcher {
         }
     }
 
+    // ★ FIXED: use File.listFiles() directly to avoid type-inference errors.
     private fun getLatestLog(logLocation: File): File? {
         return try {
-            FileTool.listFiles(logLocation)
-                .filter { it.isFile && it.name.endsWith(".log") }
-                .maxWithOrNull(compareBy { it.lastModified() }.thenBy { it.length() })
+            logLocation.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".log") }
+                ?.maxByOrNull { it.lastModified() }
         } catch (e: Exception) {
             App.logger.writeException("ActivityWatcher::getLatestLog", e)
             null
@@ -221,8 +223,6 @@ class ActivityWatcher {
             !line.contains(connection) && !line.contains(bsRPC) &&
             !line.contains(leavingRoblox) && !line.contains(universe)) return
 
-        // If a new join arrives while the previous game is still marked active,
-        // close the old session first so the new one can start cleanly.
         if (line.contains(joinServer) && isInExperience) {
             App.logger.writeLine(tag, "Join seen while still in an experience; closing previous session")
             finishActiveActivity()
@@ -257,8 +257,7 @@ class ActivityWatcher {
                             activityData.jobId = jobId
                             updateServerType(activityData)
 
-                            // ★ KEY FIX: update RPC as soon as the join is parsed,
-                            //   without waiting for the universe line.
+                            // Update RPC as soon as the join is parsed
                             if (isEnableRPC) discordRPC?.setCurrentGame()
                         } else {
                             App.logger.writeLine(tag, "Failed to parse join experience info or game info: $line")
